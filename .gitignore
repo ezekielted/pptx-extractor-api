@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+myenv/
+venv/
+.env
+
+# Spire.Presentation Cache/Logs (if any)
+bin/
+log/
+
+# IDE files
+.vscode/
+.idea/
+
