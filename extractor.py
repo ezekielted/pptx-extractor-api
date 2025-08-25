@@ -1,8 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-from spire.presentation import *
-from spire.presentation.common import *
+# Make sure to import all necessary classes
+from spire.presentation import Presentation, IChart, PictureShape, IAutoShape
 
 import os
 import json
@@ -72,39 +72,10 @@ async def extract_pptx(
 
         ppt.LoadFromFile(temp_pptx_path)
 
-        # --- FIX: Efficiently extract all images from the presentation ---
-        if extractImage:
-            image_urls = []
-            for i, image in enumerate(ppt.Images):
-                temp_image_file = None
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
-                        temp_image_file = tf.name
-                    
-                    # Save the embedded image to a temporary file
-                    image.Image.Save(temp_image_file)
-                    
-                    # Upload to Cloudinary
-                    upload_result = cloudinary.uploader.upload(
-                        temp_image_file,
-                        folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/all_images"
-                    )
-                    image_urls.append(upload_result['secure_url'])
-                    print(f"Uploaded image {i + 1} to Cloudinary.")
-                
-                except Exception as e:
-                    print(f"Error processing image {i + 1}: {e}")
-                    image_urls.append({"error": f"Failed to extract/upload image {i + 1}"})
-                
-                finally:
-                    if temp_image_file and os.path.exists(temp_image_file):
-                        os.remove(temp_image_file)
-            
-            presentation_data["extracted_images"] = image_urls
-
         for slide_index, slide in enumerate(ppt.Slides):
             slide_content = { "slide": slide_index + 1 }
 
+            # --- Text extraction logic (unchanged) ---
             if extractText:
                 slide_content["text"] = []
                 for shape in slide.Shapes:
@@ -112,15 +83,61 @@ async def extract_pptx(
                         for paragraph in shape.TextFrame.Paragraphs:
                             if paragraph.Text.strip():
                                 slide_content["text"].append(paragraph.Text)
+
+            # --- Image and Chart extraction logic (fixed and integrated) ---
+            if extractImage:
+                slide_content["images"] = []
+
+                for shape in slide.Shapes:
+                    image_to_save = None
+                    temp_image_file = None
+                    
+                    try:
+                        # --- Logic for Charts (preserved from your original code) ---
+                        if isinstance(shape, IChart):
+                            image_to_save = shape.SaveAsImage()
+
+                        # --- CORRECTED LOGIC: Added for actual Images ---
+                        elif isinstance(shape, PictureShape):
+                            if shape.Picture is not None and shape.Picture.Image is not None:
+                                image_to_save = shape.Picture.Image
+                        
+                        # If a chart or image was found, save and upload it
+                        if image_to_save is not None:
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
+                                temp_image_file = tf.name
+                            
+                            # Save the image data to the temporary file
+                            image_to_save.Save(temp_image_file)
+                        
+                            # Upload to Cloudinary
+                            upload_result = cloudinary.uploader.upload(
+                                temp_image_file, 
+                                folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/slide_{slide_index + 1}"
+                            )
+                            slide_content["images"].append(upload_result['secure_url'])
+                            print(f"Uploaded image/chart from slide {slide_index + 1} to Cloudinary.")
+                        
+                    except Exception as e:
+                        print(f"Error processing a shape on slide {slide_index + 1}: {e}")
+                        if "images" not in slide_content:
+                            slide_content["images"] = []
+                        slide_content["images"].append({"error": "Failed to extract/upload an image or chart"})
+                    finally:
+                        # Clean up the temporary image file
+                        if temp_image_file and os.path.exists(temp_image_file):
+                            os.remove(temp_image_file)
             
-            presentation_data["slides"].append(slide_content)
+            # Only add the slide to the results if it has content
+            if slide_content.get("text") or slide_content.get("images"):
+                presentation_data["slides"].append(slide_content)
 
         return JSONResponse(content=presentation_data)
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"An error occurred during PPTX processing: {e}"
+            detail=f"An error occurred during PPTX processing: {str(e)}"
         )
     finally:
         if ppt is not None:
