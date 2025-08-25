@@ -1,8 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-# Import all necessary classes for type checking
-from spire.presentation import Presentation, IChart, PictureShape, IAutoShape
+from spire.presentation import *
 
 import os
 import json
@@ -72,10 +71,47 @@ async def extract_pptx(
 
         ppt.LoadFromFile(temp_pptx_path)
 
-        for slide_index, slide in enumerate(ppt.Slides):
-            slide_content = { "slide": slide_index + 1 }
+        # Extract all images from the presentation first (if needed)
+        extracted_images = []
+        if extractImage:
+            print(f"Found {len(ppt.Images)} images in the presentation")
+            for i, image in enumerate(ppt.Images):
+                temp_image_file = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
+                        temp_image_file = tf.name
+                    
+                    # Save the image to temporary file
+                    image.Image.Save(temp_image_file)
+                    
+                    # Upload to Cloudinary
+                    upload_result = cloudinary.uploader.upload(
+                        temp_image_file, 
+                        folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/images"
+                    )
+                    
+                    extracted_images.append({
+                        "index": i,
+                        "url": upload_result['secure_url'],
+                        "public_id": upload_result['public_id']
+                    })
+                    
+                    print(f"Uploaded image {i} to Cloudinary: {upload_result['secure_url']}")
+                    
+                except Exception as e:
+                    print(f"Error processing image {i}: {e}")
+                    extracted_images.append({
+                        "index": i,
+                        "error": f"Failed to extract/upload image {i}: {str(e)}"
+                    })
+                finally:
+                    if temp_image_file and os.path.exists(temp_image_file):
+                        os.remove(temp_image_file)
 
-            # --- Text extraction logic (unchanged) ---
+        # Process each slide
+        for slide_index, slide in enumerate(ppt.Slides):
+            slide_content = {"slide": slide_index + 1}
+
             if extractText:
                 slide_content["text"] = []
                 for shape in slide.Shapes:
@@ -84,61 +120,77 @@ async def extract_pptx(
                             if paragraph.Text.strip():
                                 slide_content["text"].append(paragraph.Text)
 
-            # --- Image and Chart extraction logic (fixed and integrated) ---
             if extractImage:
                 slide_content["images"] = []
+                image_count_on_slide = 1
 
+                # Process charts (keeping your existing chart extraction logic)
                 for shape in slide.Shapes:
-                    saveable_image = None
                     temp_image_file = None
-                    
                     try:
-                        # --- Logic for Charts (preserved) ---
+                        image_to_save = None
+                        
                         if isinstance(shape, IChart):
-                            print(f"Found a Chart on slide {slide_index + 1}")
-                            saveable_image = shape.SaveAsImage()
-
-                        # --- *** THE FIX IS HERE *** ---
-                        # Correctly handle actual Picture shapes
-                        elif isinstance(shape, PictureShape):
-                            print(f"Found a Picture on slide {slide_index + 1}")
-                            if shape.Picture is not None and shape.Picture.Image is not None:
-                                # We need to access the second '.Image' property to get the saveable data
-                                saveable_image = shape.Picture.Image.Image
-                        
-                        # If a chart or image was found, save and upload it
-                        if saveable_image is not None:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
-                                temp_image_file = tf.name
+                            image_to_save = shape.SaveAsImage()
                             
-                            # Save the image data to the temporary file
-                            saveable_image.Save(temp_image_file)
-                        
-                            # Upload to Cloudinary
-                            upload_result = cloudinary.uploader.upload(
-                                temp_image_file, 
-                                folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/slide_{slide_index + 1}"
-                            )
-                            slide_content["images"].append(upload_result['secure_url'])
-                            print(f"Successfully uploaded image/chart from slide {slide_index + 1}.")
+                            if image_to_save is not None:
+                                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
+                                    temp_image_file = tf.name
+                                image_to_save.Save(temp_image_file)
+                            
+                                upload_result = cloudinary.uploader.upload(
+                                    temp_image_file, 
+                                    folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/slide_{slide_index + 1}/charts"
+                                )
+                                slide_content["images"].append({
+                                    "type": "chart",
+                                    "url": upload_result['secure_url'],
+                                    "public_id": upload_result['public_id']
+                                })
+                                print(f"Uploaded chart from slide {slide_index + 1}, shape {image_count_on_slide} to Cloudinary.")
                         
                     except Exception as e:
-                        print(f"Error processing a shape on slide {slide_index + 1}: {e}")
+                        print(f"Error processing chart from slide {slide_index + 1}, shape {image_count_on_slide}: {e}")
+                        if "images" not in slide_content:
+                            slide_content["images"] = []
+                        slide_content["images"].append({
+                            "type": "chart",
+                            "error": f"Failed to extract/upload chart for shape {image_count_on_slide}: {str(e)}"
+                        })
                     finally:
-                        # Clean up the temporary image file
                         if temp_image_file and os.path.exists(temp_image_file):
                             os.remove(temp_image_file)
+                    image_count_on_slide += 1
+
+                # Add all extracted images to each slide (you might want to modify this logic
+                # to only include images that are actually on this specific slide)
+                for img_data in extracted_images:
+                    if "error" not in img_data:
+                        slide_content["images"].append({
+                            "type": "image",
+                            "url": img_data["url"],
+                            "public_id": img_data["public_id"],
+                            "image_index": img_data["index"]
+                        })
+                    else:
+                        slide_content["images"].append({
+                            "type": "image",
+                            "error": img_data["error"],
+                            "image_index": img_data["index"]
+                        })
             
-            # Only add the slide to the results if it has content
-            if slide_content.get("text") or slide_content.get("images"):
-                presentation_data["slides"].append(slide_content)
+            presentation_data["slides"].append(slide_content)
+
+        # Also add a summary of all extracted images at the presentation level
+        if extractImage and extracted_images:
+            presentation_data["all_images"] = extracted_images
 
         return JSONResponse(content=presentation_data)
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"An error occurred during PPTX processing: {str(e)}"
+            detail=f"An error occurred during PPTX processing: {e}"
         )
     finally:
         if ppt is not None:
