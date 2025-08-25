@@ -2,6 +2,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 
 from spire.presentation import *
+from spire.presentation.common import *
 
 import os
 import json
@@ -71,6 +72,36 @@ async def extract_pptx(
 
         ppt.LoadFromFile(temp_pptx_path)
 
+        # --- FIX: Efficiently extract all images from the presentation ---
+        if extractImage:
+            image_urls = []
+            for i, image in enumerate(ppt.Images):
+                temp_image_file = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
+                        temp_image_file = tf.name
+                    
+                    # Save the embedded image to a temporary file
+                    image.Image.Save(temp_image_file)
+                    
+                    # Upload to Cloudinary
+                    upload_result = cloudinary.uploader.upload(
+                        temp_image_file,
+                        folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/all_images"
+                    )
+                    image_urls.append(upload_result['secure_url'])
+                    print(f"Uploaded image {i + 1} to Cloudinary.")
+                
+                except Exception as e:
+                    print(f"Error processing image {i + 1}: {e}")
+                    image_urls.append({"error": f"Failed to extract/upload image {i + 1}"})
+                
+                finally:
+                    if temp_image_file and os.path.exists(temp_image_file):
+                        os.remove(temp_image_file)
+            
+            presentation_data["extracted_images"] = image_urls
+
         for slide_index, slide in enumerate(ppt.Slides):
             slide_content = { "slide": slide_index + 1 }
 
@@ -81,44 +112,6 @@ async def extract_pptx(
                         for paragraph in shape.TextFrame.Paragraphs:
                             if paragraph.Text.strip():
                                 slide_content["text"].append(paragraph.Text)
-
-            if extractImage:
-                slide_content["images"] = []
-                image_count_on_slide = 1
-
-                for shape in slide.Shapes:
-                    temp_image_file = None
-                    try:
-                        image_to_save = None
-                        
-                        if isinstance(shape, IChart):
-                            image_to_save = shape.SaveAsImage()
-
-                        # --- FIX 1: Use the correct class name 'PictureShape' ---
-                        elif isinstance(shape, PictureShape):
-                            # --- FIX 2: Use 'is not None' to avoid the bug ---
-                            if shape.Picture is not None and shape.Picture.Image is not None:
-                                image_to_save = shape.Picture.Image
-                        
-                        if image_to_save is not None:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
-                                temp_image_file = tf.name
-                            image_to_save.Save(temp_image_file)
-                        
-                            upload_result = cloudinary.uploader.upload(temp_image_file, 
-                                folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/slide_{slide_index + 1}")
-                            slide_content["images"].append(upload_result['secure_url'])
-                            print(f"Uploaded image from slide {slide_index + 1}, shape {image_count_on_slide} to Cloudinary.")
-                        
-                    except Exception as e:
-                        print(f"Error processing image from slide {slide_index + 1}, shape {image_count_on_slide}: {e}")
-                        if "images" not in slide_content:
-                            slide_content["images"] = []
-                        slide_content["images"].append({"error": f"Failed to extract/upload image for shape {image_count_on_slide}"})
-                    finally:
-                        if temp_image_file and os.path.exists(temp_image_file):
-                            os.remove(temp_image_file)
-                    image_count_on_slide += 1
             
             presentation_data["slides"].append(slide_content)
 
