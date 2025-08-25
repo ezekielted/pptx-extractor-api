@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 
-# Make sure to import all necessary classes
+# Import all necessary classes for type checking
 from spire.presentation import Presentation, IChart, PictureShape, IAutoShape
 
 import os
@@ -89,26 +89,30 @@ async def extract_pptx(
                 slide_content["images"] = []
 
                 for shape in slide.Shapes:
-                    image_to_save = None
+                    saveable_image = None
                     temp_image_file = None
                     
                     try:
-                        # --- Logic for Charts (preserved from your original code) ---
+                        # --- Logic for Charts (preserved) ---
                         if isinstance(shape, IChart):
-                            image_to_save = shape.SaveAsImage()
+                            print(f"Found a Chart on slide {slide_index + 1}")
+                            saveable_image = shape.SaveAsImage()
 
-                        # --- CORRECTED LOGIC: Added for actual Images ---
+                        # --- *** THE FIX IS HERE *** ---
+                        # Correctly handle actual Picture shapes
                         elif isinstance(shape, PictureShape):
+                            print(f"Found a Picture on slide {slide_index + 1}")
                             if shape.Picture is not None and shape.Picture.Image is not None:
-                                image_to_save = shape.Picture.Image
+                                # We need to access the second '.Image' property to get the saveable data
+                                saveable_image = shape.Picture.Image.Image
                         
                         # If a chart or image was found, save and upload it
-                        if image_to_save is not None:
+                        if saveable_image is not None:
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tf:
                                 temp_image_file = tf.name
                             
                             # Save the image data to the temporary file
-                            image_to_save.Save(temp_image_file)
+                            saveable_image.Save(temp_image_file)
                         
                             # Upload to Cloudinary
                             upload_result = cloudinary.uploader.upload(
@@ -116,13 +120,10 @@ async def extract_pptx(
                                 folder=f"pptx_extractions/{os.path.basename(File.filename).split('.')[0]}/slide_{slide_index + 1}"
                             )
                             slide_content["images"].append(upload_result['secure_url'])
-                            print(f"Uploaded image/chart from slide {slide_index + 1} to Cloudinary.")
+                            print(f"Successfully uploaded image/chart from slide {slide_index + 1}.")
                         
                     except Exception as e:
                         print(f"Error processing a shape on slide {slide_index + 1}: {e}")
-                        if "images" not in slide_content:
-                            slide_content["images"] = []
-                        slide_content["images"].append({"error": "Failed to extract/upload an image or chart"})
                     finally:
                         # Clean up the temporary image file
                         if temp_image_file and os.path.exists(temp_image_file):
